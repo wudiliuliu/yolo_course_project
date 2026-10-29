@@ -1,0 +1,57 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# ===== 虚拟环境 =====
+.venv/
+venv/
+env/
+ENV/
+.conda/
+
+# ===== IDE / 编辑器 =====
+.idea/
+.vscode/
+*.swp
+
+# ===== Jupyter =====
+.ipynb_checkpoints/
+
+# ===== 数据集（大文件） =====
+datasets/
+data/
+*.zip
+*.tar
+*.tar.gz
+*.rar
+*.7z
+
+# ===== 模型权重（大文件） =====
+*.pt
+*.pth
+*.onnx
+*.engine
+*.weights
+*.h5
+*.ckpt
+*.safetensors
+
+# ===== YOLO 训练输出 =====
+runs/
+ultralytics/runs/
+wandb/
+mlruns/
+
+# ===== 日志与缓存 =====
+logs/
+*.log
+.cache/
+
+# ===== 系统文件 =====
+.DS_Store
+Thumbs.db
