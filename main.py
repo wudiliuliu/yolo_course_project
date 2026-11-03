@@ -1,92 +1,105 @@
+from sympy.codegen.ast import continue_
 from ultralytics import YOLO
 import cv2
-import json
+import numpy as np
 
-# 加载模型
-model = YOLO("yolov8n.pt")
+model = YOLO("yolo11n.pt")
+track_history = {}
+track_max_len = 60
 
-# 视频路径
-video_path = "test.mp4"
-cap = cv2.VideoCapture(video_path)
-w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-fps = cap.get(cv2.CAP_PROP_FPS)
-
-# 输出视频
-out = cv2.VideoWriter("output_track.mp4", cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
-
-# -------------------------- 计数线设置 --------------------------
-# 线的两个端点，你可以自己改坐标
-line_start = (100, h // 2)
-line_end = (w - 100, h // 2)
-
-track_history = dict()
-cross_state = dict()  # 记录每个id上一帧在线的哪一侧
+# ===== 1. 越线计数的横线（沿用之前）
+line_y = 320
 in_count = 0
 out_count = 0
-all_tracks_data = []
+# 记录每个ID上一次在线的位置，防止重复计数
+id_last_side = dict()
+
+# ===== 🆕新增：多边形警戒区域坐标，你可以自己改点
+alert_poly = np.array([
+    [200, 120],
+    [480, 120],
+    [520, 380],
+    [160, 380]
+], dtype=np.int32)
+
+cap = cv2.VideoCapture("test.mp4")
 
 while cap.isOpened():
     ret, frame = cap.read()
     if not ret:
         break
-    results = model.track(frame, persist=True, tracker="bytetrack.yaml", classes=[0])
 
-    if results[0].boxes.id is not None:
-        boxes = results[0].boxes.xyxy.cpu().numpy()
-        ids = results[0].boxes.id.cpu().numpy().astype(int)
+    results = model.track(frame, persist=True, tracker="bytetrack.yaml")
+    if results[0].boxes.id is None:
+        # 🆕新增：没有目标的时候也要绘制警戒区
+        cv2.polylines(frame, [alert_poly], isClosed=True, color=(0, 0, 255), thickness=2)
+        cv2.putText(frame, "ALERT ZONE", (alert_poly[0][0], alert_poly[0][1]-10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255),2,cv2.LINE_AA)
+        cv2.imshow("YOLO Track", frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+        continue
 
-        for box, track_id in zip(boxes, ids):
-            x1, y1, x2, y2 = box
-            cx = (x1 + x2) / 2
-            cy = (y1 + y2) / 2
+    boxes = results[0].boxes.xyxy.cpu().numpy()
+    track_ids = results[0].boxes.id.cpu().numpy().astype(int)
 
-            # 保存轨迹
-            if track_id not in track_history:
-                track_history[track_id] = []
-            track_history[track_id].append((int(cx), int(cy)))
-            if len(track_history[track_id]) > 30:
-                track_history[track_id].pop(0)
+    for i,(box, track_id) in enumerate(zip(boxes, track_ids)):
+        cls = int(results[0].boxes.cls[i].cpu().numpy())
+        if cls != 0:
+            continue
+        x1, y1, x2, y2 = box
+        cx = int((x1 + x2) / 2)
+        cy = int((y1 + y2) / 2)
 
-            # 跨线判断
-            # 线是水平中线，用y坐标判断上下
-            now_side = 1 if cy > line_start[1] else -1
-            if track_id not in cross_state:
-                cross_state[track_id] = now_side
-            else:
-                old_side = cross_state[track_id]
-                if old_side != now_side:
-                    # 发生穿越
-                    if now_side == 1:
-                        out_count += 1
-                    else:
-                        in_count += 1
-                    cross_state[track_id] = now_side
+        # 轨迹维护
+        if track_id not in track_history:
+            track_history[track_id] = []
+        track_history[track_id].append((cx, cy))
+        if len(track_history[track_id]) > track_max_len:
+            track_history[track_id].pop(0)
 
-            # 画框+id
-            cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
-            cv2.putText(frame, f"ID:{track_id}", (int(x1), int(y1)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0),2)
+        # 绘制轨迹
+        pts = np.array(track_history[track_id], dtype=np.int32)
+        cv2.polylines(frame, [pts], False, (255, 0, 255), 2)
 
-    # 绘制轨迹
-    for tid, pts in track_history.items():
-        for i in range(len(pts)-1):
-            cv2.line(frame, pts[i], pts[i+1], (255,0,255), 2)
+        # -------- 越线计数逻辑 --------
+        current_side = 1 if cy < line_y else -1
+        if track_id in id_last_side:
+            prev_side = id_last_side[track_id]
+            if prev_side != current_side:
+                if current_side == -1:
+                    in_count += 1
+                else:
+                    out_count += 1
+        id_last_side[track_id] = current_side
 
-    # 绘制计数线
-    cv2.line(frame, line_start, line_end, (0,0,255), 3)
-    cv2.putText(frame, f"In:{in_count}  Out:{out_count}", (20,40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255),2)
+        # -------- 🆕新增：入侵检测判断 --------
+        in_alert = cv2.pointPolygonTest(alert_poly, (cx, cy), False)
+        if in_alert >= 0:
+            box_color = (0, 0, 255)
+            tip_text = "INTRUSION!"
+        else:
+            box_color = (0, 255, 0)
+            tip_text = ""
 
-    out.write(frame)
-    cv2.imshow("track", frame)
+        # 画框+ID（这里颜色变量box_color是配合上面新增逻辑改动的）
+        cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), box_color, 2)
+        cv2.putText(frame, f"ID:{track_id} {tip_text}", (int(x1), int(y1)-10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, box_color, 2, cv2.LINE_AA)
+
+    # 绘制计数分界线
+    cv2.line(frame, (0, line_y), (frame.shape[1], line_y), (0, 0, 255), 2)
+    cv2.putText(frame, f"In:{in_count} | Out:{out_count}", (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2, cv2.LINE_AA)
+
+    # 🆕新增：画面上绘制警戒多边形和文字
+    cv2.polylines(frame, [alert_poly], isClosed=True, color=(0, 0, 255), thickness=2)
+    cv2.putText(frame, "ALERT ZONE", (alert_poly[0][0], alert_poly[0][1]-10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255),2,cv2.LINE_AA)
+
+    cv2.imshow("YOLO Track", frame)
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
-# 保存轨迹json
-all_tracks_data = [{"track_id":k, "points":v} for k,v in track_history.items()]
-with open("track_result.json","w",encoding="utf-8") as f:
-    json.dump(all_tracks_data, f, ensure_ascii=False, indent=2)
-
 cap.release()
-out.release()
 cv2.destroyAllWindows()
-print(f"统计完成：进入 {in_count} 人，离开 {out_count} 人")
